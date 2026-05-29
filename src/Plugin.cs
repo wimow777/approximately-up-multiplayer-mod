@@ -260,7 +260,7 @@ namespace PlayerLimitMod
                     for (int i = 0; i < objectives.Length; i++)
                     {
                         var obj = objectives[i];
-                        if (obj != null) Plugin.BoostArrayField(obj.Pointer, 0x30, $"obj[{i}]");
+                        if (obj != null) Plugin.BoostArrayField(obj.Pointer, 0x30, $"obj[{i}]", setExact: true);
                     }
             }
             catch (Exception ex) { Plugin.ModLog.LogWarning($"[PlayerLimitMod] P4: {ex.Message}"); }
@@ -284,7 +284,7 @@ namespace PlayerLimitMod
                     for (int i = 0; i < objectives.Length; i++)
                     {
                         var obj = objectives[i];
-                        if (obj != null) Plugin.BoostArrayField(obj.Pointer, 0x30, $"priv-obj[{i}]");
+                        if (obj != null) Plugin.BoostArrayField(obj.Pointer, 0x30, $"priv-obj[{i}]", setExact: true);
                     }
             }
             catch (Exception ex) { Plugin.ModLog.LogWarning($"[PlayerLimitMod] P4b: {ex.Message}"); }
@@ -295,6 +295,17 @@ namespace PlayerLimitMod
     public class PlayerCounterOverlay : MonoBehaviour
     {
         public static CSteamID CurrentLobby = CSteamID.Nil;
+
+        // Guarda el ID del lobby la primera vez que cualquier hook lo detecta.
+        public static void Capture(CSteamID lobby)
+        {
+            if (!lobby.IsValid()) return;
+            if (CurrentLobby != lobby)
+            {
+                CurrentLobby = lobby;
+                Plugin.ModLog?.LogInfo($"[PlayerLimitMod] Lobby detectado: {lobby.m_SteamID}");
+            }
+        }
 
         void OnGUI()
         {
@@ -333,34 +344,49 @@ namespace PlayerLimitMod
         [HarmonyPrefix]
         static void Prefix(CSteamID steamIDLobby)
         {
-            PlayerCounterOverlay.CurrentLobby = steamIDLobby;
+            PlayerCounterOverlay.Capture(steamIDLobby);
         }
     }
 
     // El host crea el lobby de forma asíncrona (callback LobbyCreated_t) y el
-    // juego NO siempre llama a SetLobbyMemberLimit, así que capturamos el ID
-    // desde GetNumLobbyMembers / GetLobbyMemberLimit: el juego las llama cada
-    // frame mientras estás en el lobby, así que de ahí sale el ID real.
+    // juego NO llama SetLobbyMemberLimit ni GetNumLobbyMembers por el wrapper.
+    // Pero para dibujar la lista "Lobby (1) → wimow (You)" SÍ llama a
+    // GetLobbyMemberByIndex / GetLobbyData / GetLobbyOwner. Capturamos el ID
+    // desde cualquiera de esas: la primera que dispare nos da el lobby real.
     [HarmonyPatch(typeof(SteamMatchmaking), nameof(SteamMatchmaking.GetNumLobbyMembers))]
     internal static class Patch_GetNumLobbyMembers_Capture
     {
-        [HarmonyPrefix]
-        static void Prefix(CSteamID steamIDLobby)
-        {
-            if (steamIDLobby.IsValid())
-                PlayerCounterOverlay.CurrentLobby = steamIDLobby;
-        }
+        [HarmonyPrefix] static void Prefix(CSteamID steamIDLobby) => PlayerCounterOverlay.Capture(steamIDLobby);
     }
 
     [HarmonyPatch(typeof(SteamMatchmaking), nameof(SteamMatchmaking.GetLobbyMemberLimit))]
     internal static class Patch_GetLobbyMemberLimit_Capture
     {
-        [HarmonyPrefix]
-        static void Prefix(CSteamID steamIDLobby)
-        {
-            if (steamIDLobby.IsValid())
-                PlayerCounterOverlay.CurrentLobby = steamIDLobby;
-        }
+        [HarmonyPrefix] static void Prefix(CSteamID steamIDLobby) => PlayerCounterOverlay.Capture(steamIDLobby);
+    }
+
+    [HarmonyPatch(typeof(SteamMatchmaking), nameof(SteamMatchmaking.GetLobbyMemberByIndex))]
+    internal static class Patch_GetLobbyMemberByIndex_Capture
+    {
+        [HarmonyPrefix] static void Prefix(CSteamID steamIDLobby) => PlayerCounterOverlay.Capture(steamIDLobby);
+    }
+
+    [HarmonyPatch(typeof(SteamMatchmaking), nameof(SteamMatchmaking.GetLobbyData))]
+    internal static class Patch_GetLobbyData_Capture
+    {
+        [HarmonyPrefix] static void Prefix(CSteamID steamIDLobby) => PlayerCounterOverlay.Capture(steamIDLobby);
+    }
+
+    [HarmonyPatch(typeof(SteamMatchmaking), nameof(SteamMatchmaking.SetLobbyData))]
+    internal static class Patch_SetLobbyData_Capture
+    {
+        [HarmonyPrefix] static void Prefix(CSteamID steamIDLobby) => PlayerCounterOverlay.Capture(steamIDLobby);
+    }
+
+    [HarmonyPatch(typeof(SteamMatchmaking), nameof(SteamMatchmaking.GetLobbyOwner))]
+    internal static class Patch_GetLobbyOwner_Capture
+    {
+        [HarmonyPrefix] static void Prefix(CSteamID steamIDLobby) => PlayerCounterOverlay.Capture(steamIDLobby);
     }
 
     // Crea el GameObject con el overlay en la primera escena disponible
@@ -392,6 +418,6 @@ namespace PlayerLimitMod
     {
         public const string GUID    = "com.mods.approxup.playerlimit";
         public const string Name    = "PlayerLimitMod";
-        public const string Version = "1.0.12";
+        public const string Version = "1.0.13";
     }
 }
