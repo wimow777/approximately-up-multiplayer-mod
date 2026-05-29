@@ -94,7 +94,9 @@ namespace PlayerLimitMod
         private static readonly System.Collections.Generic.HashSet<IntPtr> _boostedAddrs =
             new System.Collections.Generic.HashSet<IntPtr>();
 
-        internal static bool BoostArrayField(IntPtr ownerPtr, long fieldOff, string label)
+        // setExact=true  → fija cada valor a MAX_PLAYERS (usado para los asientos en 'demo')
+        // setExact=false → escala ×2 proporcional (resto de componentes)
+        internal static bool BoostArrayField(IntPtr ownerPtr, long fieldOff, string label, bool setExact = false)
         {
             if (ownerPtr == IntPtr.Zero) return false;
             try
@@ -111,7 +113,9 @@ namespace PlayerLimitMod
                     int old = Marshal.ReadInt32(addr);
                     if (old > 0 && old < MAX_PLAYERS)
                     {
-                        int boosted = Math.Min(old * MAX_PLAYERS / ORIGINAL_LIMIT, MAX_PLAYERS);
+                        int boosted = setExact
+                            ? MAX_PLAYERS
+                            : Math.Min(old * MAX_PLAYERS / ORIGINAL_LIMIT, MAX_PLAYERS);
                         Marshal.WriteInt32(addr, boosted);
                         _boostedAddrs.Add(addr);
                         ModLog.LogInfo($"[PlayerLimitMod] P4 {label}[{i}]: {old} → {boosted}");
@@ -235,7 +239,7 @@ namespace PlayerLimitMod
             {
                 IntPtr p = __instance.Pointer;
                 Plugin.ExtendPlayerColors(p);           // P5 — una sola vez
-                Plugin.BoostArrayField(p, 0x18,  "demo");
+                Plugin.BoostArrayField(p, 0x18,  "demo", setExact: true);  // asientos → exacto MAX
                 Plugin.BoostArrayField(p, 0x150, "tutorial");
                 var objectives = __instance._objectives;
                 if (objectives != null)
@@ -259,7 +263,7 @@ namespace PlayerLimitMod
             try
             {
                 IntPtr p = __instance.Pointer;
-                Plugin.BoostArrayField(p, 0x18,  "priv-demo");
+                Plugin.BoostArrayField(p, 0x18,  "priv-demo", setExact: true);
                 Plugin.BoostArrayField(p, 0x150, "priv-tutorial");
                 var objectives = __instance._objectives;
                 if (objectives != null)
@@ -351,6 +355,6 @@ namespace PlayerLimitMod
     {
         public const string GUID    = "com.mods.approxup.playerlimit";
         public const string Name    = "PlayerLimitMod";
-        public const string Version = "1.0.8";
+        public const string Version = "1.0.9";
     }
 }
