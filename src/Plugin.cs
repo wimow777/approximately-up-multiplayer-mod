@@ -4,6 +4,7 @@ using System.Linq;
 using System.Runtime.InteropServices;
 using BepInEx;
 using BepInEx.Unity.IL2CPP;
+using BepInEx.Unity.IL2CPP.Hook;
 using HarmonyLib;
 using Steamworks;
 using UnityEngine;
@@ -27,6 +28,8 @@ namespace PlayerLimitMod
         public const int ORIGINAL_LIMIT = 4;
 
         private const long SERVER_CHECK_RVA = 0xA9FE0B;
+        // Core.GetAvailableComponents(SCPrefab) — RVA en GameAssembly.dll (del dump)
+        private const long GET_AVAIL_RVA = 0xE4AFB0;
 
         public static BepInEx.Logging.ManualLogSource ModLog = null;
 
@@ -57,6 +60,42 @@ namespace PlayerLimitMod
                 Log.LogError($"[PlayerLimitMod] Error Harmony: {ex.Message}");
             }
             PatchServerSideLimit();
+            HookAvailableComponents();
+        }
+
+        // ── P4: detour nativo de Core.GetAvailableComponents(SCPrefab) ────────
+        // El interop no expone este método (parámetro SCPrefab es tipo DOTS), así
+        // que lo hookeamos directo en memoria. Cualquier cantidad disponible entre
+        // 1 y 7 la subimos a MAX_PLAYERS (8). La silla sin mod vale 4 → queda en 8.
+        // Componentes en 0 (bloqueados) o ya ≥8 quedan igual.
+        // SCPrefab es struct { ulong } → se pasa como un ulong por valor (x64).
+        [UnmanagedFunctionPointer(System.Runtime.InteropServices.CallingConvention.Cdecl)]
+        private delegate int GetAvailDelegate(IntPtr self, ulong scPrefab);
+        private static GetAvailDelegate _origGetAvail;
+        private static INativeDetour _availDetour;
+
+        private static int GetAvailHook(IntPtr self, ulong scPrefab)
+        {
+            int r = _origGetAvail(self, scPrefab);
+            if (r > 0 && r < MAX_PLAYERS) r = MAX_PLAYERS;
+            return r;
+        }
+
+        private static void HookAvailableComponents()
+        {
+            try
+            {
+                var mod = Process.GetCurrentProcess().Modules
+                    .Cast<ProcessModule>()
+                    .FirstOrDefault(m => m.ModuleName != null &&
+                        m.ModuleName.Equals("GameAssembly.dll", StringComparison.OrdinalIgnoreCase));
+                if (mod == null) { ModLog.LogError("[PlayerLimitMod] P4: GameAssembly.dll no encontrado."); return; }
+
+                IntPtr addr = new IntPtr(mod.BaseAddress.ToInt64() + GET_AVAIL_RVA);
+                _availDetour = INativeDetour.CreateAndApply(addr, (GetAvailDelegate)GetAvailHook, out _origGetAvail);
+                ModLog.LogInfo("[PlayerLimitMod] P4 OK — GetAvailableComponents hookeado (cantidades 1-7 → 8).");
+            }
+            catch (Exception ex) { ModLog.LogError($"[PlayerLimitMod] P4 excepción: {ex}"); }
         }
 
         // ── P3: memory-patch CMP EAX,4 → CMP EAX,MAX en CreateNetcoreClient ──
@@ -242,54 +281,18 @@ namespace PlayerLimitMod
         }
     }
 
-    // ── P4 + P5: Core.RefreshSharedAvailableComponents ────────────────────
+    // ── P5: Core.RefreshSharedAvailableComponents (solo para colores) ─────
     [HarmonyPatch(typeof(Core), "RefreshSharedAvailableComponents")]
     internal static class Patch_RefreshSharedAvailable
     {
         [HarmonyPrefix]
         static void Prefix(Core __instance)
         {
-            try
-            {
-                IntPtr p = __instance.Pointer;
-                Plugin.ExtendPlayerColors(p);           // P5 — una sola vez
-                Plugin.BoostArrayField(p, 0x18,  "demo", setExact: true);
-                Plugin.BoostArrayField(p, 0x150, "tutorial", setExact: true);  // asientos viven acá → exacto MAX
-                var objectives = __instance._objectives;
-                if (objectives != null)
-                    for (int i = 0; i < objectives.Length; i++)
-                    {
-                        var obj = objectives[i];
-                        if (obj != null) Plugin.BoostArrayField(obj.Pointer, 0x30, $"obj[{i}]", setExact: true);
-                    }
-            }
-            catch (Exception ex) { Plugin.ModLog.LogWarning($"[PlayerLimitMod] P4: {ex.Message}"); }
+            try { Plugin.ExtendPlayerColors(__instance.Pointer); }
+            catch (Exception ex) { Plugin.ModLog.LogWarning($"[PlayerLimitMod] P5: {ex.Message}"); }
         }
     }
 
-    // ── P4b: Core.RefreshPrivateAvailableComponents ───────────────────────
-    [HarmonyPatch(typeof(Core), "RefreshPrivateAvailableComponents")]
-    internal static class Patch_RefreshPrivateAvailable
-    {
-        [HarmonyPrefix]
-        static void Prefix(Core __instance)
-        {
-            try
-            {
-                IntPtr p = __instance.Pointer;
-                Plugin.BoostArrayField(p, 0x18,  "priv-demo", setExact: true);
-                Plugin.BoostArrayField(p, 0x150, "priv-tutorial", setExact: true);
-                var objectives = __instance._objectives;
-                if (objectives != null)
-                    for (int i = 0; i < objectives.Length; i++)
-                    {
-                        var obj = objectives[i];
-                        if (obj != null) Plugin.BoostArrayField(obj.Pointer, 0x30, $"priv-obj[{i}]", setExact: true);
-                    }
-            }
-            catch (Exception ex) { Plugin.ModLog.LogWarning($"[PlayerLimitMod] P4b: {ex.Message}"); }
-        }
-    }
 
     // ── Overlay: muestra jugadores conectados en esquina superior-izquierda ──
     public class PlayerCounterOverlay : MonoBehaviour
@@ -307,11 +310,30 @@ namespace PlayerLimitMod
             }
         }
 
+        // Lee Core.Get()._gameData(0x180)._lastLobbyID(0x10) directo de memoria.
+        // El juego guarda ahí el ID del lobby; no depende de hooks de Steam.
+        static void TryReadLobbyFromGame()
+        {
+            try
+            {
+                var core = Core.Get();
+                if (core == null) return;
+                IntPtr gd = Marshal.ReadIntPtr(new IntPtr(core.Pointer.ToInt64() + 0x180));
+                if (gd == IntPtr.Zero) return;
+                ulong id = (ulong)Marshal.ReadInt64(new IntPtr(gd.ToInt64() + 0x10));
+                if (id != 0) Capture(new CSteamID(id));
+            }
+            catch { }
+        }
+
         void OnGUI()
         {
             string text;
             try
             {
+                if (CurrentLobby == CSteamID.Nil || !CurrentLobby.IsValid())
+                    TryReadLobbyFromGame();
+
                 if (CurrentLobby == CSteamID.Nil || !CurrentLobby.IsValid())
                 {
                     text = $"[Mod] Sin lobby  (max {Plugin.MAX_PLAYERS})";
@@ -320,6 +342,8 @@ namespace PlayerLimitMod
                 {
                     int count = SteamMatchmaking.GetNumLobbyMembers(CurrentLobby);
                     int limit = SteamMatchmaking.GetLobbyMemberLimit(CurrentLobby);
+                    if (limit <= 0) limit = Plugin.MAX_PLAYERS;
+                    if (count <= 0) count = 1;
                     text = $"[Mod] Jugadores: {count} / {limit}";
                 }
 
@@ -418,6 +442,6 @@ namespace PlayerLimitMod
     {
         public const string GUID    = "com.mods.approxup.playerlimit";
         public const string Name    = "PlayerLimitMod";
-        public const string Version = "1.0.13";
+        public const string Version = "1.0.15";
     }
 }
