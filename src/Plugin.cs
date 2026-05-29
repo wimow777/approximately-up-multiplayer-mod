@@ -33,6 +33,20 @@ namespace PlayerLimitMod
         public override void Load()
         {
             ModLog = Log;
+
+            // Registrar el MonoBehaviour del overlay en el dominio IL2CPP.
+            // Sin esto, AddComponent<PlayerCounterOverlay>() lanza NullReference.
+            try
+            {
+                Il2CppInterop.Runtime.Injection.ClassInjector
+                    .RegisterTypeInIl2Cpp<PlayerCounterOverlay>();
+                Log.LogInfo("[PlayerLimitMod] Overlay registrado en IL2CPP.");
+            }
+            catch (Exception ex)
+            {
+                Log.LogWarning($"[PlayerLimitMod] No se pudo registrar overlay: {ex.Message}");
+            }
+
             try
             {
                 new Harmony(PluginInfo.GUID).PatchAll(typeof(Plugin).Assembly);
@@ -344,10 +358,18 @@ namespace PlayerLimitMod
         {
             if (_spawned) return;
             _spawned = true;
-            var go = new GameObject("PlayerLimitMod_Overlay");
-            go.AddComponent<PlayerCounterOverlay>();
-            UnityEngine.Object.DontDestroyOnLoad(go);
-            Plugin.ModLog.LogInfo("[PlayerLimitMod] Overlay de jugadores creado.");
+            try
+            {
+                var go = new GameObject("PlayerLimitMod_Overlay");
+                go.AddComponent<PlayerCounterOverlay>();
+                UnityEngine.Object.DontDestroyOnLoad(go);
+                Plugin.ModLog.LogInfo("[PlayerLimitMod] Overlay de jugadores creado.");
+            }
+            catch (Exception ex)
+            {
+                // El overlay es opcional; nunca debe tumbar el resto del mod.
+                Plugin.ModLog.LogWarning($"[PlayerLimitMod] Overlay no creado: {ex.Message}");
+            }
         }
     }
 
@@ -355,6 +377,6 @@ namespace PlayerLimitMod
     {
         public const string GUID    = "com.mods.approxup.playerlimit";
         public const string Name    = "PlayerLimitMod";
-        public const string Version = "1.0.9";
+        public const string Version = "1.0.10";
     }
 }
