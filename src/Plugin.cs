@@ -75,6 +75,9 @@ namespace PlayerLimitMod
         // El juego computa "8 - usados" solo → permite 8 sillas, nada más cambia.
         private static ulong _seatPrefab = 0;
         internal static bool SeatResolved = false;
+        // Solo re-aplicamos la silla cuando el juego recalculó el mapa (Refresh).
+        // Así el hook no recorre el mapa en cada llamada → no baja FPS en el garage.
+        internal static volatile bool SeatDirty = false;
 
         [UnmanagedFunctionPointer(System.Runtime.InteropServices.CallingConvention.Cdecl)]
         private delegate int GetAvailDelegate(IntPtr self, ulong scPrefab);
@@ -85,10 +88,13 @@ namespace PlayerLimitMod
         {
             try
             {
-                if (SeatResolved && self != IntPtr.Zero)
+                // Solo recorre el mapa si el juego lo recalculó (SeatDirty). En el
+                // resto de llamadas no hace nada → cero costo por frame.
+                if (SeatDirty && SeatResolved && self != IntPtr.Zero)
                 {
                     SetSeatInMap(self, 0x60, MAX_PLAYERS); // _sharedComponentsAvailability
                     SetSeatInMap(self, 0x68, MAX_PLAYERS); // _privateComponentsAvailability
+                    SeatDirty = false;
                 }
             }
             catch { }
@@ -372,7 +378,16 @@ namespace PlayerLimitMod
         static void Postfix(Core __instance)
         {
             if (!Plugin.SeatResolved) Plugin.ResolveSeat(__instance);
+            Plugin.SeatDirty = true; // el juego recalculó el mapa → reaplicar la silla una vez
         }
+    }
+
+    // El mapa privado también se recalcula aquí → marcar para reaplicar la silla.
+    [HarmonyPatch(typeof(Core), "RefreshPrivateAvailableComponents")]
+    internal static class Patch_RefreshPrivateAvailable
+    {
+        [HarmonyPostfix]
+        static void Postfix() => Plugin.SeatDirty = true;
     }
 
 
@@ -530,6 +545,6 @@ namespace PlayerLimitMod
     {
         public const string GUID    = "com.mods.approxup.playerlimit";
         public const string Name    = "PlayerLimitMod";
-        public const string Version = "1.0.17";
+        public const string Version = "1.0.18";
     }
 }
