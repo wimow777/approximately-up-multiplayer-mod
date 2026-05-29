@@ -4,6 +4,8 @@ using System.Linq;
 using System.Runtime.InteropServices;
 using BepInEx;
 using BepInEx.Unity.IL2CPP;
+using BepInEx.Unity.IL2CPP.Hook;
+using Il2CppInterop.Runtime;
 using HarmonyLib;
 using Steamworks;
 using UnityEngine;
@@ -27,6 +29,8 @@ namespace PlayerLimitMod
         public const int ORIGINAL_LIMIT = 4;
 
         private const long SERVER_CHECK_RVA = 0xA9FE0B;
+        // Core.Singleton.GetAvailableComponents(SCPrefab) — RVA en GameAssembly.dll
+        private const long GET_AVAIL_RVA = 0xE4AFB0;
 
         public static BepInEx.Logging.ManualLogSource ModLog = null;
 
@@ -57,58 +61,115 @@ namespace PlayerLimitMod
                 Log.LogError($"[PlayerLimitMod] Error Harmony: {ex.Message}");
             }
             PatchServerSideLimit();
+            HookAvailableComponents();
         }
 
-        // ── P4: duplicar el mapa de disponibilidad de componentes ─────────────
-        // El garage valida la colocación comparando _usedComponentsMapPtr (colocados)
-        // contra _sharedComponentsAvailability / _privateComponentsAvailability
-        // (UnsafeHashMap<SCPrefab,int>, total disponible). La silla vale 4 ahí.
-        // Editamos el mapa nativo y DUPLICAMOS cada valor → silla 4→8. Esto arregla
-        // a la vez el inventario Y la validación de colocación (ambos leen el mapa).
+        // ── P4: hook nativo de Core.Singleton.GetAvailableComponents(SCPrefab) ──
+        // El garage valida la colocación con: usados < disponibles. "disponibles"
+        // vive en Core.Singleton._sharedComponentsAvailability / _private (mapas
+        // UnsafeHashMap<SCPrefab,int>). La silla vale 4 ahí.
         //
-        // Layout HashMapHelper<TKey> (64-bit), el mapa es UnsafeHashMap<,>* :
-        //   0x00 byte* Ptr (buffer; valores al inicio: Ptr[idx*SizeOfTValue])
-        //   0x10 int* Next ; 0x18 int* Buckets ; 0x20 Count ; 0x24 Capacity
-        //   0x2C BucketCapacity ; 0x38 SizeOfTValue
-        internal static void DoubleAvailabilityMap(IntPtr corePtr, long fieldOff, string label)
+        // GetAvailableComponents es un método de Core.Singleton (struct), así que en
+        // el hook `self` ES el puntero al singleton → accedemos a sus mapas en
+        // self+0x60 y self+0x68. Antes de calcular, ponemos SOLO la silla en 8.
+        // El juego computa "8 - usados" solo → permite 8 sillas, nada más cambia.
+        private static ulong _seatPrefab = 0;
+        internal static bool SeatResolved = false;
+
+        [UnmanagedFunctionPointer(System.Runtime.InteropServices.CallingConvention.Cdecl)]
+        private delegate int GetAvailDelegate(IntPtr self, ulong scPrefab);
+        private static GetAvailDelegate _origGetAvail;
+        private static INativeDetour _availDetour;
+
+        private static int GetAvailHook(IntPtr self, ulong scPrefab)
         {
             try
             {
-                IntPtr map = Marshal.ReadIntPtr(new IntPtr(corePtr.ToInt64() + fieldOff));
-                if (map == IntPtr.Zero) return;
-
-                IntPtr basePtr   = Marshal.ReadIntPtr(new IntPtr(map.ToInt64() + 0x00));
-                IntPtr nextPtr   = Marshal.ReadIntPtr(new IntPtr(map.ToInt64() + 0x10));
-                IntPtr bucketsPtr= Marshal.ReadIntPtr(new IntPtr(map.ToInt64() + 0x18));
-                int count        = Marshal.ReadInt32(new IntPtr(map.ToInt64() + 0x20));
-                int capacity     = Marshal.ReadInt32(new IntPtr(map.ToInt64() + 0x24));
-                int bucketCap    = Marshal.ReadInt32(new IntPtr(map.ToInt64() + 0x2C));
-                int sizeOfVal    = Marshal.ReadInt32(new IntPtr(map.ToInt64() + 0x38));
-
-                if (basePtr == IntPtr.Zero || nextPtr == IntPtr.Zero || bucketsPtr == IntPtr.Zero) return;
-                if (capacity <= 0 || capacity > 200000 || bucketCap <= 0 || bucketCap > 200000) return;
-                if (sizeOfVal != 4) return;
-
-                int edited = 0;
-                for (int b = 0; b < bucketCap; b++)
+                if (SeatResolved && self != IntPtr.Zero)
                 {
-                    int idx = Marshal.ReadInt32(new IntPtr(bucketsPtr.ToInt64() + (long)b * 4));
-                    int guard = 0;
-                    while (idx >= 0 && idx < capacity && guard++ < capacity)
+                    SetSeatInMap(self, 0x60, MAX_PLAYERS); // _sharedComponentsAvailability
+                    SetSeatInMap(self, 0x68, MAX_PLAYERS); // _privateComponentsAvailability
+                }
+            }
+            catch { }
+            return _origGetAvail(self, scPrefab);
+        }
+
+        // Pone el valor de la silla en `value` dentro del UnsafeHashMap del singleton.
+        // HashMapHelper<TKey>: 0x00 Ptr(valores), 0x08 Keys, 0x10 Next, 0x18 Buckets,
+        //                      0x24 Capacity, 0x2C BucketCapacity, 0x38 SizeOfTValue
+        private static void SetSeatInMap(IntPtr singletonPtr, long fieldOff, int value)
+        {
+            IntPtr map = Marshal.ReadIntPtr(new IntPtr(singletonPtr.ToInt64() + fieldOff));
+            if (map == IntPtr.Zero) return;
+            IntPtr basePtr    = Marshal.ReadIntPtr(new IntPtr(map.ToInt64() + 0x00));
+            IntPtr keysPtr    = Marshal.ReadIntPtr(new IntPtr(map.ToInt64() + 0x08));
+            IntPtr nextPtr    = Marshal.ReadIntPtr(new IntPtr(map.ToInt64() + 0x10));
+            IntPtr bucketsPtr = Marshal.ReadIntPtr(new IntPtr(map.ToInt64() + 0x18));
+            int capacity      = Marshal.ReadInt32(new IntPtr(map.ToInt64() + 0x24));
+            int bucketCap     = Marshal.ReadInt32(new IntPtr(map.ToInt64() + 0x2C));
+            int sizeOfVal     = Marshal.ReadInt32(new IntPtr(map.ToInt64() + 0x38));
+            if (basePtr == IntPtr.Zero || keysPtr == IntPtr.Zero || nextPtr == IntPtr.Zero || bucketsPtr == IntPtr.Zero) return;
+            if (capacity <= 0 || capacity > 200000 || bucketCap <= 0 || bucketCap > 200000 || sizeOfVal != 4) return;
+
+            for (int b = 0; b < bucketCap; b++)
+            {
+                int idx = Marshal.ReadInt32(new IntPtr(bucketsPtr.ToInt64() + (long)b * 4));
+                int guard = 0;
+                while (idx >= 0 && idx < capacity && guard++ < capacity)
+                {
+                    ulong key = (ulong)Marshal.ReadInt64(new IntPtr(keysPtr.ToInt64() + (long)idx * 8));
+                    if (key == _seatPrefab)
                     {
                         IntPtr valAddr = new IntPtr(basePtr.ToInt64() + (long)idx * sizeOfVal);
-                        int v = Marshal.ReadInt32(valAddr);
-                        if (v > 0 && v < 100000)
-                        {
-                            Marshal.WriteInt32(valAddr, v * MAX_PLAYERS / ORIGINAL_LIMIT); // ×2
-                            edited++;
-                        }
-                        idx = Marshal.ReadInt32(new IntPtr(nextPtr.ToInt64() + (long)idx * 4));
+                        if (Marshal.ReadInt32(valAddr) != value) Marshal.WriteInt32(valAddr, value);
+                        return;
+                    }
+                    idx = Marshal.ReadInt32(new IntPtr(nextPtr.ToInt64() + (long)idx * 4));
+                }
+            }
+        }
+
+        // Identifica el SCPrefab de la silla buscando el componente EPC_SCSeat
+        // en Core._componentsMap (Dictionary<SCPrefab, EPC_SpaceshipComponent>).
+        internal static void ResolveSeat(Core core)
+        {
+            if (SeatResolved || core == null) return;
+            try
+            {
+                var map = core._componentsMap;
+                if (map == null) return;
+                foreach (var kv in map)
+                {
+                    var epc = kv.Value;
+                    if (epc == null) continue;
+                    if (epc.TryCast<EPC_SCSeat>() != null)
+                    {
+                        _seatPrefab = kv.Key.ToUlong();
+                        SeatResolved = true;
+                        ModLog.LogInfo($"[PlayerLimitMod] P4 — silla identificada: SCPrefab={_seatPrefab}");
+                        return;
                     }
                 }
-                ModLog.LogInfo($"[PlayerLimitMod] P4 {label}: {edited} componentes ×{MAX_PLAYERS / ORIGINAL_LIMIT} (count={count}).");
             }
-            catch (Exception ex) { ModLog.LogWarning($"[PlayerLimitMod] P4 {label}: {ex.Message}"); }
+            catch (Exception ex) { ModLog.LogWarning($"[PlayerLimitMod] ResolveSeat: {ex.Message}"); }
+        }
+
+        private static void HookAvailableComponents()
+        {
+            try
+            {
+                var mod = Process.GetCurrentProcess().Modules
+                    .Cast<ProcessModule>()
+                    .FirstOrDefault(m => m.ModuleName != null &&
+                        m.ModuleName.Equals("GameAssembly.dll", StringComparison.OrdinalIgnoreCase));
+                if (mod == null) { ModLog.LogError("[PlayerLimitMod] P4: GameAssembly.dll no encontrado."); return; }
+
+                IntPtr addr = new IntPtr(mod.BaseAddress.ToInt64() + GET_AVAIL_RVA);
+                _availDetour = INativeDetour.CreateAndApply(addr, (GetAvailDelegate)GetAvailHook, out _origGetAvail);
+                ModLog.LogInfo("[PlayerLimitMod] P4 OK — GetAvailableComponents hookeado (silla → 8).");
+            }
+            catch (Exception ex) { ModLog.LogError($"[PlayerLimitMod] P4 excepción: {ex}"); }
         }
 
         // ── P3: memory-patch CMP EAX,4 → CMP EAX,MAX en CreateNetcoreClient ──
@@ -294,9 +355,9 @@ namespace PlayerLimitMod
         }
     }
 
-    // ── P4 + P5: Core.RefreshSharedAvailableComponents ────────────────────
-    // Prefix: extiende colores (P5). Postfix: duplica el mapa de disponibilidad
-    // compartida DESPUÉS de que el juego lo recalcula (P4).
+    // ── P5 + resolver silla: Core.RefreshSharedAvailableComponents ────────
+    // Prefix: extiende colores (P5). Postfix: identifica el SCPrefab de la silla
+    // (necesario para que el hook nativo P4 sepa qué componente subir a 8).
     [HarmonyPatch(typeof(Core), "RefreshSharedAvailableComponents")]
     internal static class Patch_RefreshSharedAvailable
     {
@@ -310,18 +371,7 @@ namespace PlayerLimitMod
         [HarmonyPostfix]
         static void Postfix(Core __instance)
         {
-            Plugin.DoubleAvailabilityMap(__instance.Pointer, 0x60, "shared"); // _sharedComponentsAvailability
-        }
-    }
-
-    // ── P4b: Core.RefreshPrivateAvailableComponents ───────────────────────
-    [HarmonyPatch(typeof(Core), "RefreshPrivateAvailableComponents")]
-    internal static class Patch_RefreshPrivateAvailable
-    {
-        [HarmonyPostfix]
-        static void Postfix(Core __instance)
-        {
-            Plugin.DoubleAvailabilityMap(__instance.Pointer, 0x68, "private"); // _privateComponentsAvailability
+            if (!Plugin.SeatResolved) Plugin.ResolveSeat(__instance);
         }
     }
 
@@ -342,17 +392,23 @@ namespace PlayerLimitMod
             }
         }
 
-        // Lee Core.Get()._gameData(0x180)._lastLobbyID(0x10) directo de memoria.
-        // El juego guarda ahí el ID del lobby; no depende de hooks de Steam.
+        // Lee Core.Get()._steam(0x288)._currentLobby(0x10) directo de memoria.
+        // SteamManager guarda el lobby ACTUAL (se setea al crear o unirse).
+        private static bool _loggedLobbyRead = false;
         static void TryReadLobbyFromGame()
         {
             try
             {
                 var core = Core.Get();
                 if (core == null) return;
-                IntPtr gd = Marshal.ReadIntPtr(new IntPtr(core.Pointer.ToInt64() + 0x180));
-                if (gd == IntPtr.Zero) return;
-                ulong id = (ulong)Marshal.ReadInt64(new IntPtr(gd.ToInt64() + 0x10));
+                IntPtr steam = Marshal.ReadIntPtr(new IntPtr(core.Pointer.ToInt64() + 0x288)); // _steam
+                if (steam == IntPtr.Zero) return;
+                ulong id = (ulong)Marshal.ReadInt64(new IntPtr(steam.ToInt64() + 0x10));        // _currentLobby
+                if (!_loggedLobbyRead)
+                {
+                    _loggedLobbyRead = true;
+                    Plugin.ModLog?.LogInfo($"[PlayerLimitMod] Overlay — SteamManager._currentLobby = {id}");
+                }
                 if (id != 0) Capture(new CSteamID(id));
             }
             catch { }
@@ -474,6 +530,6 @@ namespace PlayerLimitMod
     {
         public const string GUID    = "com.mods.approxup.playerlimit";
         public const string Name    = "PlayerLimitMod";
-        public const string Version = "1.0.16";
+        public const string Version = "1.0.17";
     }
 }
