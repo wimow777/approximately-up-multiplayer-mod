@@ -1,0 +1,5 @@
+BepInEx/cache/
+BepInEx/config/
+BepInEx/interop/
+BepInEx/LogOutput.log
+BepInEx/ErrorLog.log
