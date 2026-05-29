@@ -69,6 +69,26 @@ Si aparecen, el mod está activo.
 
 ---
 
+## Configuración (opcional)
+
+La primera vez que abrís el juego con el mod, se crea un archivo de config en:
+```
+BepInEx/config/com.mods.approxup.playerlimit.cfg
+```
+
+Lo podés editar con el bloc de notas (cerrá el juego antes). Opciones:
+
+| Opción | Default | Qué hace |
+|---|---|---|
+| `MaxPlayers` | `8` | Máximo de jugadores y de sillas (rango 4–32) |
+| `BoostSillas` | `true` | Sube las sillas colocables al máximo |
+| `ColoresJugadores` | `true` | Colores extra para cada jugador |
+| `Overlay` | `true` | Contador de jugadores en pantalla |
+
+No hace falta tocarlo: con los valores por defecto ya funciona con 8 jugadores.
+
+---
+
 ## Desinstalar
 
 Borrá o mové `BepInEx/plugins/PlayerLimitMod.dll`. El juego vuelve a funcionar normal.

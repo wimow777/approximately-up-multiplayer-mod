@@ -25,8 +25,14 @@ namespace PlayerLimitMod
     [BepInPlugin(PluginInfo.GUID, PluginInfo.Name, PluginInfo.Version)]
     public class Plugin : BasePlugin
     {
-        public const int MAX_PLAYERS    = 8;
-        public const int ORIGINAL_LIMIT = 4;
+        // MAX_PLAYERS ahora viene del config (no es const). ORIGINAL_LIMIT es fijo (el juego).
+        public static int  MAX_PLAYERS    = 8;
+        public const  int  ORIGINAL_LIMIT = 4;
+
+        // Toggles configurables
+        public static bool EnableSeatBoost    = true;
+        public static bool EnablePlayerColors = true;
+        public static bool EnableOverlay      = true;
 
         private const long SERVER_CHECK_RVA = 0xA9FE0B;
         // Core.Singleton.GetAvailableComponents(SCPrefab) — RVA en GameAssembly.dll
@@ -38,17 +44,36 @@ namespace PlayerLimitMod
         {
             ModLog = Log;
 
-            // Registrar el MonoBehaviour del overlay en el dominio IL2CPP.
-            // Sin esto, AddComponent<PlayerCounterOverlay>() lanza NullReference.
-            try
+            // ── Configuración (BepInEx/config/com.mods.approxup.playerlimit.cfg) ──
+            var cfgMax = Config.Bind("General", "MaxPlayers", 8,
+                "Número máximo de jugadores (y de sillas colocables). El juego original permite 4. Rango 4–32.");
+            var cfgSeat = Config.Bind("Funciones", "BoostSillas", true,
+                "Sube las sillas colocables al máximo de jugadores.");
+            var cfgColors = Config.Bind("Funciones", "ColoresJugadores", true,
+                "Agrega colores extra para que cada jugador tenga el suyo.");
+            var cfgOverlay = Config.Bind("Funciones", "Overlay", true,
+                "Muestra el contador de jugadores en pantalla (esquina superior izquierda).");
+
+            MAX_PLAYERS        = Math.Max(ORIGINAL_LIMIT, Math.Min(cfgMax.Value, 32)); // clamp 4..32
+            EnableSeatBoost    = cfgSeat.Value;
+            EnablePlayerColors = cfgColors.Value;
+            EnableOverlay      = cfgOverlay.Value;
+            Log.LogInfo($"[PlayerLimitMod] Config: MaxPlayers={MAX_PLAYERS}, BoostSillas={EnableSeatBoost}, " +
+                        $"Colores={EnablePlayerColors}, Overlay={EnableOverlay}");
+
+            // Registrar el MonoBehaviour del overlay en el dominio IL2CPP (solo si está activo).
+            if (EnableOverlay)
             {
-                Il2CppInterop.Runtime.Injection.ClassInjector
-                    .RegisterTypeInIl2Cpp<PlayerCounterOverlay>();
-                Log.LogInfo("[PlayerLimitMod] Overlay registrado en IL2CPP.");
-            }
-            catch (Exception ex)
-            {
-                Log.LogWarning($"[PlayerLimitMod] No se pudo registrar overlay: {ex.Message}");
+                try
+                {
+                    Il2CppInterop.Runtime.Injection.ClassInjector
+                        .RegisterTypeInIl2Cpp<PlayerCounterOverlay>();
+                    Log.LogInfo("[PlayerLimitMod] Overlay registrado en IL2CPP.");
+                }
+                catch (Exception ex)
+                {
+                    Log.LogWarning($"[PlayerLimitMod] No se pudo registrar overlay: {ex.Message}");
+                }
             }
 
             try
@@ -61,7 +86,7 @@ namespace PlayerLimitMod
                 Log.LogError($"[PlayerLimitMod] Error Harmony: {ex.Message}");
             }
             PatchServerSideLimit();
-            HookAvailableComponents();
+            if (EnableSeatBoost) HookAvailableComponents();
         }
 
         // ── P4: hook nativo de Core.Singleton.GetAvailableComponents(SCPrefab) ──
@@ -270,12 +295,21 @@ namespace PlayerLimitMod
         private static bool _colorsExtended = false;
 
         // RGBA de los 4 colores extra (índices 4–7)
+        // Paleta de colores extra (índices 4+). Soporta hasta MAX_PLAYERS grandes.
         private static readonly float[] ExtraColors = new float[]
         {
             1.0f, 0.50f, 0.08f, 1.0f,  // naranja
             0.65f, 0.15f, 1.0f,  1.0f,  // violeta
             0.08f, 0.88f, 0.88f, 1.0f,  // cian
             1.0f, 0.35f, 0.75f,  1.0f,  // rosa
+            0.95f, 0.85f, 0.10f, 1.0f,  // amarillo
+            0.20f, 0.80f, 0.30f, 1.0f,  // verde lima
+            0.60f, 0.40f, 0.20f, 1.0f,  // marrón
+            0.80f, 0.80f, 0.90f, 1.0f,  // blanco azulado
+            0.50f, 0.50f, 0.50f, 1.0f,  // gris
+            0.90f, 0.30f, 0.30f, 1.0f,  // rojo coral
+            0.30f, 0.50f, 0.90f, 1.0f,  // azul cielo
+            0.55f, 0.90f, 0.55f, 1.0f,  // verde menta
         };
 
         internal static unsafe void ExtendPlayerColors(IntPtr corePtr)
@@ -370,6 +404,7 @@ namespace PlayerLimitMod
         [HarmonyPrefix]
         static void Prefix(Core __instance)
         {
+            if (!Plugin.EnablePlayerColors) return;
             try { Plugin.ExtendPlayerColors(__instance.Pointer); }
             catch (Exception ex) { Plugin.ModLog.LogWarning($"[PlayerLimitMod] P5: {ex.Message}"); }
         }
@@ -524,7 +559,7 @@ namespace PlayerLimitMod
         [HarmonyPostfix]
         static void Postfix()
         {
-            if (_spawned) return;
+            if (!Plugin.EnableOverlay || _spawned) return;
             _spawned = true;
             try
             {
@@ -545,6 +580,6 @@ namespace PlayerLimitMod
     {
         public const string GUID    = "com.mods.approxup.playerlimit";
         public const string Name    = "PlayerLimitMod";
-        public const string Version = "1.0.18";
+        public const string Version = "1.0.19";
     }
 }
