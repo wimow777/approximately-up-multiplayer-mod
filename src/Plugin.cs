@@ -89,6 +89,10 @@ namespace PlayerLimitMod
         private const int CA_STRIDE  = 16;
         private const int CA_AMT_OFF = 8;
 
+        // Tracks native addresses already boosted — prevents cascading ×2 across multiple Refresh calls.
+        private static readonly System.Collections.Generic.HashSet<IntPtr> _boostedAddrs =
+            new System.Collections.Generic.HashSet<IntPtr>();
+
         internal static bool BoostArrayField(IntPtr ownerPtr, long fieldOff, string label)
         {
             if (ownerPtr == IntPtr.Zero) return false;
@@ -102,13 +106,13 @@ namespace PlayerLimitMod
                 for (int i = 0; i < length; i++)
                 {
                     IntPtr addr = new IntPtr(arrayPtr.ToInt64() + ARR_HEADER + (long)i * CA_STRIDE + CA_AMT_OFF);
+                    if (_boostedAddrs.Contains(addr)) continue;
                     int old = Marshal.ReadInt32(addr);
                     if (old > 0 && old < MAX_PLAYERS)
                     {
-                        // Escalar proporcionalmente (×2) en vez de fijar a MAX,
-                        // para que la suma de fuentes llegue a MAX y no lo supere.
                         int boosted = Math.Min(old * MAX_PLAYERS / ORIGINAL_LIMIT, MAX_PLAYERS);
                         Marshal.WriteInt32(addr, boosted);
+                        _boostedAddrs.Add(addr);
                         ModLog.LogInfo($"[PlayerLimitMod] P4 {label}[{i}]: {old} → {boosted}");
                         found = true;
                     }
@@ -272,6 +276,6 @@ namespace PlayerLimitMod
     {
         public const string GUID    = "com.mods.approxup.playerlimit";
         public const string Name    = "PlayerLimitMod";
-        public const string Version = "1.0.6";
+        public const string Version = "1.0.7";
     }
 }
