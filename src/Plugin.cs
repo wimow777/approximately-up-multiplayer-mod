@@ -253,8 +253,8 @@ namespace PlayerLimitMod
             {
                 IntPtr p = __instance.Pointer;
                 Plugin.ExtendPlayerColors(p);           // P5 — una sola vez
-                Plugin.BoostArrayField(p, 0x18,  "demo", setExact: true);  // asientos → exacto MAX
-                Plugin.BoostArrayField(p, 0x150, "tutorial");
+                Plugin.BoostArrayField(p, 0x18,  "demo", setExact: true);
+                Plugin.BoostArrayField(p, 0x150, "tutorial", setExact: true);  // asientos viven acá → exacto MAX
                 var objectives = __instance._objectives;
                 if (objectives != null)
                     for (int i = 0; i < objectives.Length; i++)
@@ -278,7 +278,7 @@ namespace PlayerLimitMod
             {
                 IntPtr p = __instance.Pointer;
                 Plugin.BoostArrayField(p, 0x18,  "priv-demo", setExact: true);
-                Plugin.BoostArrayField(p, 0x150, "priv-tutorial");
+                Plugin.BoostArrayField(p, 0x150, "priv-tutorial", setExact: true);
                 var objectives = __instance._objectives;
                 if (objectives != null)
                     for (int i = 0; i < objectives.Length; i++)
@@ -337,16 +337,26 @@ namespace PlayerLimitMod
         }
     }
 
-    // El ID real del lobby se obtiene del callback LobbyCreated_t.
-    // Lo interceptamos parcheando el método que lo procesa si existe,
-    // o directamente desde el patch de CreateLobby (el SteamID es devuelto
-    // async, así que usamos un segundo parche en SetLobbyMemberLimit que
-    // siempre se llama justo después de que el lobby queda creado).
-    [HarmonyPatch(typeof(SteamMatchmaking), nameof(SteamMatchmaking.SetLobbyMemberLimit))]
-    internal static class Patch_SetLobbyMemberLimit_CaptureLobby
+    // El host crea el lobby de forma asíncrona (callback LobbyCreated_t) y el
+    // juego NO siempre llama a SetLobbyMemberLimit, así que capturamos el ID
+    // desde GetNumLobbyMembers / GetLobbyMemberLimit: el juego las llama cada
+    // frame mientras estás en el lobby, así que de ahí sale el ID real.
+    [HarmonyPatch(typeof(SteamMatchmaking), nameof(SteamMatchmaking.GetNumLobbyMembers))]
+    internal static class Patch_GetNumLobbyMembers_Capture
     {
         [HarmonyPrefix]
-        static void Prefix(CSteamID steamIDLobby, int cMaxMembers)
+        static void Prefix(CSteamID steamIDLobby)
+        {
+            if (steamIDLobby.IsValid())
+                PlayerCounterOverlay.CurrentLobby = steamIDLobby;
+        }
+    }
+
+    [HarmonyPatch(typeof(SteamMatchmaking), nameof(SteamMatchmaking.GetLobbyMemberLimit))]
+    internal static class Patch_GetLobbyMemberLimit_Capture
+    {
+        [HarmonyPrefix]
+        static void Prefix(CSteamID steamIDLobby)
         {
             if (steamIDLobby.IsValid())
                 PlayerCounterOverlay.CurrentLobby = steamIDLobby;
@@ -382,6 +392,6 @@ namespace PlayerLimitMod
     {
         public const string GUID    = "com.mods.approxup.playerlimit";
         public const string Name    = "PlayerLimitMod";
-        public const string Version = "1.0.11";
+        public const string Version = "1.0.12";
     }
 }
