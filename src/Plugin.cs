@@ -4,7 +4,6 @@ using System.Linq;
 using System.Runtime.InteropServices;
 using BepInEx;
 using BepInEx.Unity.IL2CPP;
-using BepInEx.Unity.IL2CPP.Hook;
 using HarmonyLib;
 using Steamworks;
 using UnityEngine;
@@ -28,8 +27,6 @@ namespace PlayerLimitMod
         public const int ORIGINAL_LIMIT = 4;
 
         private const long SERVER_CHECK_RVA = 0xA9FE0B;
-        // Core.GetAvailableComponents(SCPrefab) — RVA en GameAssembly.dll (del dump)
-        private const long GET_AVAIL_RVA = 0xE4AFB0;
 
         public static BepInEx.Logging.ManualLogSource ModLog = null;
 
@@ -60,42 +57,58 @@ namespace PlayerLimitMod
                 Log.LogError($"[PlayerLimitMod] Error Harmony: {ex.Message}");
             }
             PatchServerSideLimit();
-            HookAvailableComponents();
         }
 
-        // ── P4: detour nativo de Core.GetAvailableComponents(SCPrefab) ────────
-        // El interop no expone este método (parámetro SCPrefab es tipo DOTS), así
-        // que lo hookeamos directo en memoria. Cualquier cantidad disponible entre
-        // 1 y 7 la subimos a MAX_PLAYERS (8). La silla sin mod vale 4 → queda en 8.
-        // Componentes en 0 (bloqueados) o ya ≥8 quedan igual.
-        // SCPrefab es struct { ulong } → se pasa como un ulong por valor (x64).
-        [UnmanagedFunctionPointer(System.Runtime.InteropServices.CallingConvention.Cdecl)]
-        private delegate int GetAvailDelegate(IntPtr self, ulong scPrefab);
-        private static GetAvailDelegate _origGetAvail;
-        private static INativeDetour _availDetour;
-
-        private static int GetAvailHook(IntPtr self, ulong scPrefab)
-        {
-            int r = _origGetAvail(self, scPrefab);
-            if (r > 0 && r < MAX_PLAYERS) r = MAX_PLAYERS;
-            return r;
-        }
-
-        private static void HookAvailableComponents()
+        // ── P4: duplicar el mapa de disponibilidad de componentes ─────────────
+        // El garage valida la colocación comparando _usedComponentsMapPtr (colocados)
+        // contra _sharedComponentsAvailability / _privateComponentsAvailability
+        // (UnsafeHashMap<SCPrefab,int>, total disponible). La silla vale 4 ahí.
+        // Editamos el mapa nativo y DUPLICAMOS cada valor → silla 4→8. Esto arregla
+        // a la vez el inventario Y la validación de colocación (ambos leen el mapa).
+        //
+        // Layout HashMapHelper<TKey> (64-bit), el mapa es UnsafeHashMap<,>* :
+        //   0x00 byte* Ptr (buffer; valores al inicio: Ptr[idx*SizeOfTValue])
+        //   0x10 int* Next ; 0x18 int* Buckets ; 0x20 Count ; 0x24 Capacity
+        //   0x2C BucketCapacity ; 0x38 SizeOfTValue
+        internal static void DoubleAvailabilityMap(IntPtr corePtr, long fieldOff, string label)
         {
             try
             {
-                var mod = Process.GetCurrentProcess().Modules
-                    .Cast<ProcessModule>()
-                    .FirstOrDefault(m => m.ModuleName != null &&
-                        m.ModuleName.Equals("GameAssembly.dll", StringComparison.OrdinalIgnoreCase));
-                if (mod == null) { ModLog.LogError("[PlayerLimitMod] P4: GameAssembly.dll no encontrado."); return; }
+                IntPtr map = Marshal.ReadIntPtr(new IntPtr(corePtr.ToInt64() + fieldOff));
+                if (map == IntPtr.Zero) return;
 
-                IntPtr addr = new IntPtr(mod.BaseAddress.ToInt64() + GET_AVAIL_RVA);
-                _availDetour = INativeDetour.CreateAndApply(addr, (GetAvailDelegate)GetAvailHook, out _origGetAvail);
-                ModLog.LogInfo("[PlayerLimitMod] P4 OK — GetAvailableComponents hookeado (cantidades 1-7 → 8).");
+                IntPtr basePtr   = Marshal.ReadIntPtr(new IntPtr(map.ToInt64() + 0x00));
+                IntPtr nextPtr   = Marshal.ReadIntPtr(new IntPtr(map.ToInt64() + 0x10));
+                IntPtr bucketsPtr= Marshal.ReadIntPtr(new IntPtr(map.ToInt64() + 0x18));
+                int count        = Marshal.ReadInt32(new IntPtr(map.ToInt64() + 0x20));
+                int capacity     = Marshal.ReadInt32(new IntPtr(map.ToInt64() + 0x24));
+                int bucketCap    = Marshal.ReadInt32(new IntPtr(map.ToInt64() + 0x2C));
+                int sizeOfVal    = Marshal.ReadInt32(new IntPtr(map.ToInt64() + 0x38));
+
+                if (basePtr == IntPtr.Zero || nextPtr == IntPtr.Zero || bucketsPtr == IntPtr.Zero) return;
+                if (capacity <= 0 || capacity > 200000 || bucketCap <= 0 || bucketCap > 200000) return;
+                if (sizeOfVal != 4) return;
+
+                int edited = 0;
+                for (int b = 0; b < bucketCap; b++)
+                {
+                    int idx = Marshal.ReadInt32(new IntPtr(bucketsPtr.ToInt64() + (long)b * 4));
+                    int guard = 0;
+                    while (idx >= 0 && idx < capacity && guard++ < capacity)
+                    {
+                        IntPtr valAddr = new IntPtr(basePtr.ToInt64() + (long)idx * sizeOfVal);
+                        int v = Marshal.ReadInt32(valAddr);
+                        if (v > 0 && v < 100000)
+                        {
+                            Marshal.WriteInt32(valAddr, v * MAX_PLAYERS / ORIGINAL_LIMIT); // ×2
+                            edited++;
+                        }
+                        idx = Marshal.ReadInt32(new IntPtr(nextPtr.ToInt64() + (long)idx * 4));
+                    }
+                }
+                ModLog.LogInfo($"[PlayerLimitMod] P4 {label}: {edited} componentes ×{MAX_PLAYERS / ORIGINAL_LIMIT} (count={count}).");
             }
-            catch (Exception ex) { ModLog.LogError($"[PlayerLimitMod] P4 excepción: {ex}"); }
+            catch (Exception ex) { ModLog.LogWarning($"[PlayerLimitMod] P4 {label}: {ex.Message}"); }
         }
 
         // ── P3: memory-patch CMP EAX,4 → CMP EAX,MAX en CreateNetcoreClient ──
@@ -281,7 +294,9 @@ namespace PlayerLimitMod
         }
     }
 
-    // ── P5: Core.RefreshSharedAvailableComponents (solo para colores) ─────
+    // ── P4 + P5: Core.RefreshSharedAvailableComponents ────────────────────
+    // Prefix: extiende colores (P5). Postfix: duplica el mapa de disponibilidad
+    // compartida DESPUÉS de que el juego lo recalcula (P4).
     [HarmonyPatch(typeof(Core), "RefreshSharedAvailableComponents")]
     internal static class Patch_RefreshSharedAvailable
     {
@@ -290,6 +305,23 @@ namespace PlayerLimitMod
         {
             try { Plugin.ExtendPlayerColors(__instance.Pointer); }
             catch (Exception ex) { Plugin.ModLog.LogWarning($"[PlayerLimitMod] P5: {ex.Message}"); }
+        }
+
+        [HarmonyPostfix]
+        static void Postfix(Core __instance)
+        {
+            Plugin.DoubleAvailabilityMap(__instance.Pointer, 0x60, "shared"); // _sharedComponentsAvailability
+        }
+    }
+
+    // ── P4b: Core.RefreshPrivateAvailableComponents ───────────────────────
+    [HarmonyPatch(typeof(Core), "RefreshPrivateAvailableComponents")]
+    internal static class Patch_RefreshPrivateAvailable
+    {
+        [HarmonyPostfix]
+        static void Postfix(Core __instance)
+        {
+            Plugin.DoubleAvailabilityMap(__instance.Pointer, 0x68, "private"); // _privateComponentsAvailability
         }
     }
 
@@ -442,6 +474,6 @@ namespace PlayerLimitMod
     {
         public const string GUID    = "com.mods.approxup.playerlimit";
         public const string Name    = "PlayerLimitMod";
-        public const string Version = "1.0.15";
+        public const string Version = "1.0.16";
     }
 }
