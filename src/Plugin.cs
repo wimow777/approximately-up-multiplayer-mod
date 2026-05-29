@@ -105,8 +105,11 @@ namespace PlayerLimitMod
                     int old = Marshal.ReadInt32(addr);
                     if (old > 0 && old < MAX_PLAYERS)
                     {
-                        Marshal.WriteInt32(addr, MAX_PLAYERS);
-                        ModLog.LogInfo($"[PlayerLimitMod] P4 {label}[{i}]: {old} → {MAX_PLAYERS}");
+                        // Escalar proporcionalmente (×2) en vez de fijar a MAX,
+                        // para que la suma de fuentes llegue a MAX y no lo supere.
+                        int boosted = Math.Min(old * MAX_PLAYERS / ORIGINAL_LIMIT, MAX_PLAYERS);
+                        Marshal.WriteInt32(addr, boosted);
+                        ModLog.LogInfo($"[PlayerLimitMod] P4 {label}[{i}]: {old} → {boosted}");
                         found = true;
                     }
                 }
@@ -269,6 +272,6 @@ namespace PlayerLimitMod
     {
         public const string GUID    = "com.mods.approxup.playerlimit";
         public const string Name    = "PlayerLimitMod";
-        public const string Version = "1.0.5";
+        public const string Version = "1.0.6";
     }
 }
