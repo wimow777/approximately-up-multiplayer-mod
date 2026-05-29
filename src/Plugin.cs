@@ -6,6 +6,7 @@ using BepInEx;
 using BepInEx.Unity.IL2CPP;
 using HarmonyLib;
 using Steamworks;
+using UnityEngine;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // PlayerLimitMod — aumenta el límite de 4 a MAX_PLAYERS jugadores
@@ -272,10 +273,84 @@ namespace PlayerLimitMod
         }
     }
 
+    // ── Overlay: muestra jugadores conectados en esquina superior-izquierda ──
+    public class PlayerCounterOverlay : MonoBehaviour
+    {
+        public static CSteamID CurrentLobby = CSteamID.Nil;
+
+        void OnGUI()
+        {
+            string text;
+            if (CurrentLobby == CSteamID.Nil || !CurrentLobby.IsValid())
+            {
+                text = $"[Mod] Sin lobby  (max {Plugin.MAX_PLAYERS})";
+            }
+            else
+            {
+                int count = SteamMatchmaking.GetNumLobbyMembers(CurrentLobby);
+                int limit = SteamMatchmaking.GetLobbyMemberLimit(CurrentLobby);
+                text = $"[Mod] Jugadores: {count} / {limit}";
+            }
+
+            // Fondo oscuro semitransparente para legibilidad
+            GUI.color = new Color(0f, 0f, 0f, 0.55f);
+            GUI.DrawTexture(new Rect(6, 6, 254, 26), Texture2D.whiteTexture);
+            GUI.color = Color.white;
+            GUI.Label(new Rect(10, 8, 250, 24), text);
+        }
+    }
+
+    // Captura el ID del lobby al crearlo o unirse
+    [HarmonyPatch(typeof(SteamMatchmaking), nameof(SteamMatchmaking.CreateLobby))]
+    internal static class Patch_LobbyCreated { } // lobby ID llega por callback, lo capturamos abajo
+
+    [HarmonyPatch(typeof(SteamMatchmaking), nameof(SteamMatchmaking.JoinLobby))]
+    internal static class Patch_JoinLobby
+    {
+        [HarmonyPrefix]
+        static void Prefix(CSteamID steamIDLobby)
+        {
+            PlayerCounterOverlay.CurrentLobby = steamIDLobby;
+        }
+    }
+
+    // El ID real del lobby se obtiene del callback LobbyCreated_t.
+    // Lo interceptamos parcheando el método que lo procesa si existe,
+    // o directamente desde el patch de CreateLobby (el SteamID es devuelto
+    // async, así que usamos un segundo parche en SetLobbyMemberLimit que
+    // siempre se llama justo después de que el lobby queda creado).
+    [HarmonyPatch(typeof(SteamMatchmaking), nameof(SteamMatchmaking.SetLobbyMemberLimit))]
+    internal static class Patch_SetLobbyMemberLimit_CaptureLobby
+    {
+        [HarmonyPrefix]
+        static void Prefix(CSteamID steamIDLobby, int cMaxMembers)
+        {
+            if (steamIDLobby.IsValid())
+                PlayerCounterOverlay.CurrentLobby = steamIDLobby;
+        }
+    }
+
+    // Crea el GameObject con el overlay en la primera escena disponible
+    [HarmonyPatch(typeof(Core), "RefreshSharedAvailableComponents")]
+    internal static class Patch_SpawnOverlay
+    {
+        private static bool _spawned = false;
+        [HarmonyPostfix]
+        static void Postfix()
+        {
+            if (_spawned) return;
+            _spawned = true;
+            var go = new GameObject("PlayerLimitMod_Overlay");
+            go.AddComponent<PlayerCounterOverlay>();
+            UnityEngine.Object.DontDestroyOnLoad(go);
+            Plugin.ModLog.LogInfo("[PlayerLimitMod] Overlay de jugadores creado.");
+        }
+    }
+
     internal static class PluginInfo
     {
         public const string GUID    = "com.mods.approxup.playerlimit";
         public const string Name    = "PlayerLimitMod";
-        public const string Version = "1.0.7";
+        public const string Version = "1.0.8";
     }
 }
