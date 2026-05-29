@@ -299,22 +299,27 @@ namespace PlayerLimitMod
         void OnGUI()
         {
             string text;
-            if (CurrentLobby == CSteamID.Nil || !CurrentLobby.IsValid())
+            try
             {
-                text = $"[Mod] Sin lobby  (max {Plugin.MAX_PLAYERS})";
-            }
-            else
-            {
-                int count = SteamMatchmaking.GetNumLobbyMembers(CurrentLobby);
-                int limit = SteamMatchmaking.GetLobbyMemberLimit(CurrentLobby);
-                text = $"[Mod] Jugadores: {count} / {limit}";
-            }
+                if (CurrentLobby == CSteamID.Nil || !CurrentLobby.IsValid())
+                {
+                    text = $"[Mod] Sin lobby  (max {Plugin.MAX_PLAYERS})";
+                }
+                else
+                {
+                    int count = SteamMatchmaking.GetNumLobbyMembers(CurrentLobby);
+                    int limit = SteamMatchmaking.GetLobbyMemberLimit(CurrentLobby);
+                    text = $"[Mod] Jugadores: {count} / {limit}";
+                }
 
-            // Fondo oscuro semitransparente para legibilidad
-            GUI.color = new Color(0f, 0f, 0f, 0.55f);
-            GUI.DrawTexture(new Rect(6, 6, 254, 26), Texture2D.whiteTexture);
-            GUI.color = Color.white;
-            GUI.Label(new Rect(10, 8, 250, 24), text);
+                // Solo GUI.Label (DrawTexture/Box están stripped en este build IL2CPP).
+                // Sombra negra desplazada + texto blanco para legibilidad sin fondo.
+                GUI.color = Color.black;
+                GUI.Label(new Rect(11, 9, 300, 24), text);
+                GUI.color = Color.white;
+                GUI.Label(new Rect(10, 8, 300, 24), text);
+            }
+            catch { /* nunca tumbar el render del juego */ }
         }
     }
 
@@ -377,6 +382,6 @@ namespace PlayerLimitMod
     {
         public const string GUID    = "com.mods.approxup.playerlimit";
         public const string Name    = "PlayerLimitMod";
-        public const string Version = "1.0.10";
+        public const string Version = "1.0.11";
     }
 }
